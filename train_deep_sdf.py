@@ -259,8 +259,8 @@ def main_function(experiment_directory, continue_from, batch_split):
     data_source = specs["DataSource"]
     train_split_file = specs["TrainSplit"]
 
+    #arch = __import__("networks." + specs["NetworkArch"], fromlist=["Decoder", "Decoder_direct"])
     arch = __import__("networks." + specs["NetworkArch"], fromlist=["Decoder"])
-
     logging.debug(specs["NetworkSpecs"])
 
     latent_size = specs["CodeLength"]
@@ -289,12 +289,16 @@ def main_function(experiment_directory, continue_from, batch_split):
         save_optimizer(experiment_directory, "latest.pth", optimizer_all, epoch)
         save_latent_vectors(experiment_directory, "latest.pth", lat_vecs, epoch)
 
+        #save_model(experiment_directory, 'latest_decoder_direct.pth', decoder_direct, epoch)
+        #save_latent_vectors(experiment_directory, 'latest_direct_vec.pth', direct_lat_vecs, epoch)
     def save_checkpoints(epoch):
 
         save_model(experiment_directory, str(epoch) + ".pth", decoder, epoch)
         save_optimizer(experiment_directory, str(epoch) + ".pth", optimizer_all, epoch)
         save_latent_vectors(experiment_directory, str(epoch) + ".pth", lat_vecs, epoch)
 
+        #save_model(experiment_directory, str(epoch) + "_decoder_direct.pth", decoder_direct, epoch)
+        #save_latent_vectors(experiment_directory, str(epoch) + '_direct_vec.pth', direct_lat_vecs, epoch)
     def signal_handler(sig, frame):
         logging.info("Stopping early...")
         sys.exit(0)
@@ -302,6 +306,7 @@ def main_function(experiment_directory, continue_from, batch_split):
     def adjust_learning_rate(lr_schedules, optimizer, epoch):
 
         for i, param_group in enumerate(optimizer.param_groups):
+            #k = i if i <=1 else 1
             param_group["lr"] = lr_schedules[i].get_learning_rate(epoch)
 
     def empirical_stat(latent_vecs, indices):
@@ -328,10 +333,14 @@ def main_function(experiment_directory, continue_from, batch_split):
 
     decoder = arch.Decoder(latent_size, **specs["NetworkSpecs"]).cuda()
 
+    #decoder_direct = arch.Decoder_direct(latent_size, **specs["NetworkSpecs"]).cuda()
+
     logging.info("training with {} GPU(s)".format(torch.cuda.device_count()))
 
     # if torch.cuda.device_count() > 1:
     decoder = torch.nn.DataParallel(decoder)
+
+    #decoder_direct = torch.nn.DataParallel(decoder_direct)
 
     num_epochs = specs["NumEpochs"]
     log_frequency = get_spec_with_default(specs, "LogFrequency", 10)
@@ -362,12 +371,20 @@ def main_function(experiment_directory, continue_from, batch_split):
 
     logging.debug(decoder)
 
+    #logging.debug(decoder_direct)
     lat_vecs = torch.nn.Embedding(num_scenes, latent_size, max_norm=code_bound)
+    #direct_lat_vecs = torch.nn.Embedding(num_scenes, latent_size, max_norm=code_bound)
     torch.nn.init.normal_(
         lat_vecs.weight.data,
         0.0,
         get_spec_with_default(specs, "CodeInitStdDev", 1.0) / math.sqrt(latent_size),
-    )
+    )       #initialize latent vector
+
+    # torch.nn.init.normal_(
+    #     direct_lat_vecs.weight.data,
+    #     0.0,
+    #     get_spec_with_default(specs, "CodeInitStdDev", 1.0) / math.sqrt(latent_size),
+    # )  # initialize latent vector
 
     logging.debug(
         "initialized with mean magnitude {}".format(
@@ -376,7 +393,7 @@ def main_function(experiment_directory, continue_from, batch_split):
     )
 
     loss_l1 = torch.nn.L1Loss(reduction="sum")
-
+    loss_l1_1 = torch.nn.L1Loss(reduction="sum")
     optimizer_all = torch.optim.Adam(
         [
             {
@@ -386,7 +403,16 @@ def main_function(experiment_directory, continue_from, batch_split):
             {
                 "params": lat_vecs.parameters(),
                 "lr": lr_schedules[1].get_learning_rate(0),
-            },
+            }
+            # {
+            #     "params": decoder_direct.parameters(),
+            #     "lr": lr_schedules[0].get_learning_rate(0),
+            # },
+            # {
+            #     "params": direct_lat_vecs.parameters(),
+            #     "lr": lr_schedules[1].get_learning_rate(0),
+            # },
+
         ]
     )
 
@@ -409,6 +435,14 @@ def main_function(experiment_directory, continue_from, batch_split):
         model_epoch = ws.load_model_parameters(
             experiment_directory, continue_from, decoder
         )
+
+        # direct_lat_epoch = load_latent_vectors(
+        #     experiment_directory, continue_from + ".pth", direct_lat_vecs
+        # )
+
+        # direct_model_epoch = ws.load_model_parameters(
+        #     experiment_directory, continue_from, decoder_direct
+        # )
 
         optimizer_epoch = load_optimizer(
             experiment_directory, continue_from + ".pth", optimizer_all
@@ -456,13 +490,14 @@ def main_function(experiment_directory, continue_from, batch_split):
         logging.info("epoch {}...".format(epoch))
 
         decoder.train()
-
+        #decoder_direct.train()
         adjust_learning_rate(lr_schedules, optimizer_all, epoch)
 
         for sdf_data, indices in sdf_loader:
-
+            print(sdf_data.shape)
             # Process the input data
-            sdf_data = sdf_data.reshape(-1, 4)
+            #sdf_data = sdf_data.reshape(-1, 4)
+            sdf_data = sdf_data.reshape(-1, 7)
 
             num_sdf_samples = sdf_data.shape[0]
 
@@ -470,17 +505,18 @@ def main_function(experiment_directory, continue_from, batch_split):
 
             xyz = sdf_data[:, 0:3]
             sdf_gt = sdf_data[:, 3].unsqueeze(1)
-
+            sdf_direct = sdf_data[:, 4:]
             if enforce_minmax:
                 sdf_gt = torch.clamp(sdf_gt, minT, maxT)
 
-            xyz = torch.chunk(xyz, batch_split)
+            xyz = torch.chunk(xyz, batch_split)     #split bachtches into several subbatches
             indices = torch.chunk(
                 indices.unsqueeze(-1).repeat(1, num_samp_per_scene).view(-1),
                 batch_split,
             )
 
             sdf_gt = torch.chunk(sdf_gt, batch_split)
+            sdf_direct = torch.chunk(sdf_direct, batch_split)
 
             batch_loss = 0.0
 
@@ -492,13 +528,15 @@ def main_function(experiment_directory, continue_from, batch_split):
 
                 input = torch.cat([batch_vecs, xyz[i]], dim=1)
 
+                # batch_direct_vecs = direct_lat_vecs(indices[i])
+                # input_direct = torch.cat([batch_direct_vecs, xyz[i]], dim=1)
                 # NN optimization
-                pred_sdf = decoder(input)
-
+                pred_sdf, pred_direct = decoder(input)
+                #pred_direct = decoder_direct(input_direct)
                 if enforce_minmax:
                     pred_sdf = torch.clamp(pred_sdf, minT, maxT)
 
-                chunk_loss = loss_l1(pred_sdf, sdf_gt[i].cuda()) / num_sdf_samples
+                chunk_loss = loss_l1(pred_sdf, sdf_gt[i].cuda()) / num_sdf_samples + 0.01 * loss_l1_1(pred_direct, sdf_direct[i].cuda()) / num_sdf_samples
 
                 if do_code_regularization:
                     l2_size_loss = torch.sum(torch.norm(batch_vecs, dim=1))
@@ -506,20 +544,29 @@ def main_function(experiment_directory, continue_from, batch_split):
                         code_reg_lambda * min(1, epoch / 100) * l2_size_loss
                     ) / num_sdf_samples
 
-                    chunk_loss = chunk_loss + reg_loss.cuda()
+                    # l2_size_loss_direct = torch.sum(torch.norm(batch_direct_vecs, dim=1))
+                    # reg_loss_direct = (
+                    #     code_reg_lambda * min(1, epoch / 100) * l2_size_loss_direct
+                    # ) / num_sdf_samples
+
+                    chunk_loss = chunk_loss + reg_loss.cuda() #+ reg_loss_direct.cuda()
 
                 chunk_loss.backward()
 
                 batch_loss += chunk_loss.item()
 
+                with torch.no_grad():
+                    chunk_loss_sdf = (loss_l1(pred_sdf, sdf_gt[i].cuda()) / num_sdf_samples ).item()
+                    chunk_loss_direct = (loss_l1(pred_direct, sdf_direct[i].cuda()) / num_sdf_samples).item()
             logging.debug("loss = {}".format(batch_loss))
-
+            logging.debug("loss_sdf = {}".format(chunk_loss_sdf))
+            logging.debug("loss_direct = {}".format(chunk_loss_direct))
             loss_log.append(batch_loss)
 
             if grad_clip is not None:
 
                 torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
-
+                #torch.nn.utils.clip_grad_norm_(decoder_direct.parameters(), grad_clip)
             optimizer_all.step()
 
         end = time.time()

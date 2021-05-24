@@ -45,7 +45,7 @@ def reconstruct(
 
     loss_num = 0
     loss_l1 = torch.nn.L1Loss()
-
+    loss_l1_1 = torch.nn.L1Loss()
     for e in range(num_iterations):
 
         decoder.eval()
@@ -56,7 +56,8 @@ def reconstruct(
         sdf_gt = sdf_data[:, 3].unsqueeze(1)
 
         sdf_gt = torch.clamp(sdf_gt, -clamp_dist, clamp_dist)
-
+        sdf_direct = sdf_data[:, 4:]
+        sdf_direct = torch.clamp(sdf_direct, -1, 1)
         adjust_learning_rate(lr, optimizer, e, decreased_by, adjust_lr_every)
 
         optimizer.zero_grad()
@@ -65,15 +66,15 @@ def reconstruct(
 
         inputs = torch.cat([latent_inputs, xyz], 1).cuda()
 
-        pred_sdf = decoder(inputs)
+        pred_sdf, pred_direct = decoder(inputs)
 
         # TODO: why is this needed?
         if e == 0:
-            pred_sdf = decoder(inputs)
+            pred_sdf, pred_direct = decoder(inputs)
 
         pred_sdf = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
-
-        loss = loss_l1(pred_sdf, sdf_gt)
+        pred_direct = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
+        loss = loss_l1(pred_sdf, sdf_gt) + 0.01 * loss_l1_1(pred_direct, sdf_direct)
         if l2reg:
             loss += 1e-4 * torch.mean(latent.pow(2))
         loss.backward()
@@ -221,7 +222,7 @@ if __name__ == "__main__":
         logging.debug("loading {}".format(npz))
 
         data_sdf = deep_sdf.data.read_sdf_samples_into_ram(full_filename)
-
+        
         for k in range(repeat):
 
             if rerun > 1:
@@ -269,6 +270,46 @@ if __name__ == "__main__":
             logging.debug("latent: {}".format(latent.detach().cpu().numpy()))
 
             decoder.eval()
+            with torch.no_grad():
+                logging.debug("data shape: {}".format(data_sdf[1].shape))
+                logging.debug("latent shape: {}".format(latent.shape))
+                inputs= torch.cat((data_sdf[0][:, :3], data_sdf[1][:, :3]),dim=0)
+                sdf_gt = torch.cat((data_sdf[0][:, 3].unsqueeze(1), data_sdf[1][:, 3].unsqueeze(1)), dim=0)
+                sdf_direct = torch.cat((data_sdf[0][:, 4:], data_sdf[1][:, 4:]), dim=0)
+                sdf_gt = torch.clamp(sdf_gt, -0.1, 0.1)
+                sdf_direct = torch.clamp(sdf_direct, -1, 1)
+                
+                if torch.any(torch.isnan(sdf_gt)):
+                    logging.debug("input sdf isnan")
+                    sdf_gt = torch.where(torch.isnan(sdf_gt), torch.full_like(sdf_gt, 0), sdf_gt)
+                if torch.any(torch.isnan(sdf_direct)):
+                    logging.debug("input sdf direct isnan")
+                    sdf_direct = torch.where(torch.isnan(sdf_direct), torch.full_like(sdf_direct, 0), sdf_direct)
+                
+                num_samples = len(inputs)
+                latent_expand = latent.expand(num_samples, -1)
+                inputs = torch.cat([latent_expand, inputs.cuda()], dim=1)
+                logging.debug("input shapes: {}".format(inputs.shape))
+                logging.debug("sdf_gt shape: {}".format(sdf_gt.shape))
+                logging.debug("sdf_direct shape: {}".format(sdf_direct.shape))
+                pred_sdf, pred_direct = decoder(inputs)
+                pred_sdf = torch.clamp(pred_sdf, -0.1, 0.1)
+                pred_direct = torch.clamp(pred_direct, -1, 1)
+
+                if torch.any(torch.isnan(pred_sdf)):
+                    logging.debug("predict sdf isnan")
+                if torch.any(torch.isnan(pred_direct)):
+                    logging.debug("predict direct isnan")
+                logging.debug("pred_sdf: {}".format(pred_sdf))
+                logging.debug("pred_direct: {}".format(pred_direct))
+                #loss_l1 = torch.nn.L1Loss()
+                #loss_l1_1 = torch.nn.L1Loss()
+                #loss_sdf = (loss_l1(pred_sdf, sdf_gt.cuda()) / num_samples).item()
+                #loss_direct = (loss_l1(pred_direct, sdf_direct.cuda()) / num_samples).item()
+                loss_sdf = torch.sum(pred_sdf - sdf_gt.cuda()) / num_samples
+                loss_direct = torch.sum(pred_direct - sdf_direct.cuda()) / num_samples
+                logging.info("loss_sdf: " + str(loss_sdf))
+                logging.info("loss_direct: " + str(loss_direct))
 
             if not os.path.exists(os.path.dirname(mesh_filename)):
                 os.makedirs(os.path.dirname(mesh_filename))
